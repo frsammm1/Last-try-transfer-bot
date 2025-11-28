@@ -21,14 +21,13 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENT SETUP (OPTIMIZED) ---
-# request_retries badhaya hai taaki packet loss hone par bhi speed maintain rahe
+# --- CLIENT SETUP ---
+# Connection Optimization
 user_client = TelegramClient(
     StringSession(STRING_SESSION), 
     API_ID, 
     API_HASH, 
     connection_retries=None,
-    request_retries=10, 
     flood_sleep_threshold=60
 )
 bot_client = TelegramClient(
@@ -36,7 +35,6 @@ bot_client = TelegramClient(
     API_ID, 
     API_HASH, 
     connection_retries=None,
-    request_retries=10, 
     flood_sleep_threshold=60
 )
 
@@ -50,7 +48,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Nitro Mode)! ⚡️")
+    return web.Response(text="Bot is Running (Max Speed)! 🟢")
 
 async def start_web_server():
     app = web.Application()
@@ -80,8 +78,8 @@ async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message, animation_frame
     now = time.time()
     
-    # Update every 6 seconds to focus CPU on transfer
-    if now - last_update_time < 6: return 
+    # Update every 8 seconds (Focus on Speed)
+    if now - last_update_time < 8: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
@@ -89,26 +87,26 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["⚡️", "🔋", "🚀", "🔥"]
+    frames = ["🟢", "🟡", "🟠", "🔴"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
     filled = math.floor(percentage / 10)
-    bar = "█" * filled + "░" * (10 - filled)
+    bar = "▇" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
-            f"{icon} **Nitro Transfer...**\n"
-            f"📄 `{file_name}`\n\n"
+            f"{icon} **MAX SPEED MODE**\n"
+            f"📂 `{file_name}`\n\n"
             f"**{bar} {round(percentage, 1)}%**\n\n"
-            f"🏎 **Speed:** `{human_readable_size(speed)}/s`\n"
+            f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
             f"⏳ **ETA:** `{time_formatter(eta)}`\n"
-            f"💾 **Size:** `{human_readable_size(current)} / {human_readable_size(total)}`"
+            f"💾 **Data:** `{human_readable_size(current)}`"
         )
     except MessageNotModifiedError: pass
     except Exception: pass
 
-# --- CUSTOM STREAM CLASS (SPEED BOOSTED) ---
+# --- CUSTOM STREAM CLASS (8MB CHUNKS) ---
 class UserClientStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -118,9 +116,8 @@ class UserClientStream:
         self.start_time = start_time
         self.current_bytes = 0
         
-        # NITRO MODE: Chunk size increased to 4MB (4096KB)
-        # Bigger chunks = Less requests = More Speed
-        self.generator = client.iter_download(location, chunk_size=4096*1024)
+        # 8MB Chunks = Less API Calls = More Speed
+        self.generator = client.iter_download(location, chunk_size=8192*1024)
         self.buffer = b""
         self._finished = False
 
@@ -128,8 +125,8 @@ class UserClientStream:
         return self.file_size
 
     async def read(self, size=-1):
-        # Serve at least 4MB chunks to Uploader
-        if size == -1: size = 4096 * 1024
+        # Always serve at least 8MB if possible
+        if size == -1: size = 8192 * 1024
         
         while len(self.buffer) < size and not self._finished:
             try:
@@ -185,7 +182,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"⚙️ **Nitro Engine Started!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"🟢 **Bot Connected!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -225,15 +222,15 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                     start_time = time.time()
                     sent_successfully = False
                     
-                    # 1. DIRECT COPY (Instant)
+                    # 1. DIRECT COPY
                     try:
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
                         sent_successfully = True
                     except Exception:
-                        pass # Silently fail to Stream Mode
+                        pass # Fail silently to Stream Mode
 
-                    # 2. STREAM MODE (Nitro)
+                    # 2. STREAM MODE (If Direct Failed)
                     if not sent_successfully:
                         file_size = 0
                         location = None
@@ -297,7 +294,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("⚡️ **Nitro Bot Ready!**\n`/clone Source Dest`")
+    await event.respond("🟢 **Max Speed Bot Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
