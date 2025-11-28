@@ -2,9 +2,11 @@ import os
 import asyncio
 import logging
 import random
+import time
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import MediaCaptionTooLongError
+from telethon.errors import MediaCaptionTooLongError, FloodWaitError
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from aiohttp import web
 
 # --- CONFIGURATION ---
@@ -28,7 +30,7 @@ is_running = False
 
 # --- WEB SERVER (Keep-Alive) ---
 async def handle(request):
-    return web.Response(text="Bot is Running on Docker! 🐳")
+    return web.Response(text="Bot is Running with Live Status! 🚀")
 
 async def start_web_server():
     app = web.Application()
@@ -39,22 +41,57 @@ async def start_web_server():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
 
+# --- HELPER: GET FILE NAME ---
+def get_file_name(message):
+    if isinstance(message.media, MessageMediaDocument):
+        for attr in message.media.document.attributes:
+            if hasattr(attr, 'file_name'):
+                return attr.file_name
+        return "Unknown_Doc"
+    elif isinstance(message.media, MessageMediaPhoto):
+        return "Photo.jpg"
+    return "Unknown Media"
+
 # --- TRANSFER LOGIC ---
 async def transfer_process(event, source_id, dest_id):
     global is_running
+    
+    # Live Status Message bhejo
+    status_msg = await event.respond(f"🚀 **Initializing Clone...**\nTarget: `{source_id}`")
+    
+    total_processed = 0
+    last_edit_time = time.time()
+    
     try:
-        await event.respond(f"🚀 **Cloning Started!**\nSource: `{source_id}`\nDest: `{dest_id}`")
-        
         async for message in user_client.iter_messages(source_id, reverse=True):
             if not is_running:
-                await bot_client.send_message(event.chat_id, "🛑 **Stopped!**")
+                await bot_client.edit_message(event.chat_id, status_msg.id, "🛑 **Process Stopped by User!**")
                 break
 
             if getattr(message, 'action', None):
                 continue
 
             try:
-                await asyncio.sleep(random.uniform(2, 5))
+                # --- LIVE UPDATE LOGIC (Har 3-4 second me edit karega) ---
+                current_time = time.time()
+                file_info = "Text Message"
+                if message.media:
+                    file_info = get_file_name(message)
+
+                if current_time - last_edit_time > 4: # FloodWait se bachne ke liye delay
+                    await bot_client.edit_message(
+                        event.chat_id, 
+                        status_msg.id,
+                        f"🔄 **Cloning in Progress...**\n\n"
+                        f"🆔 **Msg ID:** `{message.id}`\n"
+                        f"📂 **Current:** `{file_info}`\n"
+                        f"✅ **Done:** `{total_processed}` msgs\n"
+                        f"⏳ **Status:** Uploading..."
+                    )
+                    last_edit_time = current_time
+                
+                # --- PROCESSING ---
+                await asyncio.sleep(random.uniform(2, 4))
                 
                 if message.text and not message.media:
                     await bot_client.send_message(dest_id, message.text)
@@ -69,15 +106,24 @@ async def transfer_process(event, source_id, dest_id):
                         await bot_client.send_message(dest_id, caption)
                     except Exception:
                         # Attempt 2: Stream (No Disk)
+                        # Status update for streaming
+                        if current_time - last_edit_time > 4:
+                            await bot_client.edit_message(event.chat_id, status_msg.id, f"⬇️ **Downloading to RAM:** `{file_info}`")
+                        
                         buffer = await user_client.download_media(message, file=bytes)
                         await bot_client.send_file(dest_id, file=buffer, caption=caption)
 
+                total_processed += 1
+
+            except FloodWaitError as e:
+                logger.warning(f"FloodWait: Sleeping {e.seconds}s")
+                await asyncio.sleep(e.seconds)
             except Exception as e:
                 logger.error(f"Error msg {message.id}: {e}")
                 continue
 
         if is_running:
-            await bot_client.send_message(event.chat_id, "✅ **Done!**")
+            await bot_client.edit_message(event.chat_id, status_msg.id, f"✅ **Cloning Completed!**\nTotal Messages: `{total_processed}`")
 
     except Exception as e:
         await bot_client.send_message(event.chat_id, f"❌ Error: {e}")
@@ -87,7 +133,7 @@ async def transfer_process(event, source_id, dest_id):
 # --- BOT COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("👋 **Docker Bot Ready!**\nUse: `/clone <Source_ID> <Dest_ID>`\nStop: `/stop`")
+    await event.respond("👋 **Live Status Bot Ready!**\nUse: `/clone <Source_ID> <Dest_ID>`\nStop: `/stop`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_handler(event):
@@ -124,4 +170,18 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
 
+🆕 इसमें नया क्या है?
+ * Live Editing Message: अब बॉट एक मैसेज भेजेगा और उसे ही एडिट करता रहेगा।
+ * File Name Detection: get_file_name फंक्शन लगा दिया है, जो बताएगा कि video.mp4 जा रहा है या document.pdf.
+ * Real-Time Dashboard: बॉट अब ऐसा दिखेगा:
+   🔄 Cloning in Progress...
 
+🆔 Msg ID: 4502
+📂 Current: Avengers_Endgame_720p.mkv
+✅ Done: 15 msgs
+⏳ Status: Uploading...
+
+
+
+
+                        
