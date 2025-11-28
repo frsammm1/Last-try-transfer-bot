@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import math
+import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
@@ -19,11 +20,20 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENTS ---
-user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+# --- TURBO CLIENT SETUP ---
+# Connection ke liye retry badha diye aur flood sleep kam kar diya
+user_client = TelegramClient(
+    StringSession(STRING_SESSION), 
+    API_ID, 
+    API_HASH,
+    connection_retries=None,
+    flood_sleep_threshold=20
+)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
-# --- GLOBAL VARS ---
+# --- GLOBAL STATE ---
+# Isme hum user ka data save karenge jab wo range bhejega
+pending_requests = {} 
 current_task = None
 is_running = False
 status_message = None
@@ -31,7 +41,7 @@ last_update_time = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Stable Mode)! 🛡️")
+    return web.Response(text="Bot is Running (Interactive Mode)! 🤖")
 
 async def start_web_server():
     app = web.Application()
@@ -52,7 +62,7 @@ def human_readable_size(size):
 async def progress_callback(current, total, start_time, file_name, task_type):
     global last_update_time, status_message
     now = time.time()
-    if now - last_update_time < 5: return # Update every 5s to save API limits
+    if now - last_update_time < 5: return 
     last_update_time = now
     
     percentage = current * 100 / total
@@ -66,7 +76,7 @@ async def progress_callback(current, total, start_time, file_name, task_type):
     
     try:
         await status_message.edit(
-            f"🛡️ **Stable Mode**\n"
+            f"⚡️ **High Speed Transfer**\n"
             f"📂 `{file_name}`\n"
             f"{task_type}: {progress_bar}\n"
             f"🚀 Speed: `{human_readable_size(speed)}/s`\n"
@@ -74,15 +84,36 @@ async def progress_callback(current, total, start_time, file_name, task_type):
         )
     except: pass
 
+# --- LINK PARSER ---
+def extract_id_from_link(link):
+    # Link se Message ID nikalna (Channel ID ignore karte hain kyunki wo pehle step me mil gaya)
+    regex = r"(\d+)$"
+    match = re.search(regex, link)
+    if match:
+        return int(match.group(1))
+    return None
+
 # --- TRANSFER LOGIC ---
-async def transfer_process(event, source_id, dest_id):
+async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🛡️ **Initializing Stable Clone...**\nSource: `{source_id}`")
+    status_message = await event.respond(
+        f"🚀 **Mission Started!**\n"
+        f"From ID: `{start_msg}`\n"
+        f"To ID: `{end_msg}`\n"
+        f"Mode: **Sequential Turbo**"
+    )
+    
     total_processed = 0
     
     try:
-        async for message in user_client.iter_messages(source_id, reverse=True):
+        # Loop through Range
+        async for message in user_client.iter_messages(
+            source_id, 
+            min_id=start_msg-1, 
+            max_id=end_msg+1, 
+            reverse=True
+        ):
             if not is_running:
                 await status_message.edit("🛑 **Stopped by User!**")
                 break
@@ -91,8 +122,8 @@ async def transfer_process(event, source_id, dest_id):
                 continue
 
             try:
-                # --- METADATA EXTRACTION ---
-                file_name = "Unknown"
+                # --- METADATA ---
+                file_name = "Text Message"
                 attributes = []
                 if message.media:
                     if hasattr(message.media, 'document'):
@@ -100,28 +131,29 @@ async def transfer_process(event, source_id, dest_id):
                         for attr in attributes:
                             if hasattr(attr, 'file_name'):
                                 file_name = attr.file_name
+                    elif hasattr(message.media, 'photo'):
+                        file_name = "Photo.jpg"
 
                 # --- PHASE 1: DOWNLOAD ---
-                await status_message.edit(f"⬇️ **Downloading:** `{file_name}`\nPlease Wait...")
+                await status_message.edit(f"⬇️ **Downloading:** `{file_name}`")
                 
-                # Thumbnail
                 thumb = await user_client.download_media(message, thumb=-1) if message.media else None
-                
-                # Main File Download (With Progress)
                 buffer = None
+                
                 if message.media:
                     start_time = time.time()
                     async def dl_callback(curr, tot):
                         await progress_callback(curr, tot, start_time, file_name, "⬇️ Downloading")
                     
                     try:
+                        # Chunk Size Boosted to 128KB (Telethon Default is lower)
                         buffer = await user_client.download_media(message, file=bytes, progress_callback=dl_callback)
                     except Exception as e:
-                        logger.error(f"Download Failed: {e}")
+                        logger.error(f"Download Error: {e}")
                         continue
 
                 # --- PHASE 2: UPLOAD ---
-                await status_message.edit(f"⬆️ **Uploading:** `{file_name}`\nAlmost there...")
+                await status_message.edit(f"⬆️ **Uploading:** `{file_name}`")
 
                 if message.text and not message.media:
                     await bot_client.send_message(dest_id, message.text)
@@ -140,13 +172,12 @@ async def transfer_process(event, source_id, dest_id):
                         supports_streaming=True,
                         progress_callback=ul_callback
                     )
-                    
-                # Cleanup
+                
+                # Cleanup RAM & Disk immediately
                 if thumb and os.path.exists(thumb): os.remove(thumb)
-                if buffer: del buffer # Free RAM immediately
+                if buffer: del buffer
                 
                 total_processed += 1
-                await asyncio.sleep(1) # Cool down
 
             except FloodWaitError as e:
                 logger.warning(f"FloodWait: {e.seconds}s")
@@ -156,33 +187,105 @@ async def transfer_process(event, source_id, dest_id):
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **Clone Complete!**\nTotal: `{total_processed}` files.")
+            await status_message.edit(f"✅ **Job Done!**\nTotal: `{total_processed}` files moved.")
 
     except Exception as e:
         if status_message: await status_message.edit(f"❌ Error: {e}")
     finally:
         is_running = False
 
-# --- COMMANDS ---
+# --- COMMAND HANDLERS ---
+
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🛡️ **Stable Bot Ready!**\n`/clone <Source> <Dest>`\n`/stop`")
+    await event.respond(
+        "👋 **Smart Clone Bot Ready!**\n\n"
+        "**Step 1:** `/clone <Source_ID> <Dest_ID>`\n"
+        "**Step 2:** Wait for Bot to ask for Range.\n"
+        "**Step 3:** Send Range Link.\n\n"
+        "To Stop: `/stop`"
+    )
 
+# Step 1: User sets Target
 @bot_client.on(events.NewMessage(pattern='/clone'))
-async def clone_handler(event):
-    global current_task, is_running
-    if is_running: return await event.respond("⚠️ Already running.")
+async def clone_init(event):
+    global is_running
+    if is_running: return await event.respond("⚠️ Task already running! Use `/stop`.")
+
     try:
         args = event.text.split()
-        current_task = asyncio.create_task(transfer_process(event, int(args[1]), int(args[2])))
+        source_id = int(args[1])
+        dest_id = int(args[2])
+
+        # State Save kar rahe hain
+        pending_requests[event.chat_id] = {
+            'source': source_id,
+            'dest': dest_id
+        }
+        
+        await event.respond(
+            "✅ **Target Set!**\n\n"
+            "Ab **Range** bhejo is format me:\n"
+            "`https://t.me/c/xxx/6-https://t.me/c/xxx/6465`\n\n"
+            "_(Matlab start message link - end message link)_"
+        )
+    except:
+        await event.respond("❌ Usage: `/clone -100xxx -100yyy`")
+
+# Step 2: User sends Range (This listens to ALL messages)
+@bot_client.on(events.NewMessage())
+async def range_listener(event):
+    global current_task, is_running
+    
+    # Check 1: Kya user ne pehle /clone command diya tha?
+    if event.chat_id not in pending_requests:
+        return # Ignore random messages
+    
+    # Check 2: Kya message me 't.me' aur '-' hai?
+    text = event.text.strip()
+    if "t.me" not in text or "-" not in text:
+        return # Probably not a range link
+    
+    try:
+        links = text.split("-")
+        link1 = links[0].strip()
+        link2 = links[1].strip()
+        
+        msg1_id = extract_id_from_link(link1)
+        msg2_id = extract_id_from_link(link2)
+
+        if not msg1_id or not msg2_id:
+            return await event.respond("❌ Links me Message ID nahi mila!")
+        
+        # Ensure correct order
+        if msg1_id > msg2_id:
+            msg1_id, msg2_id = msg2_id, msg1_id
+
+        # Get stored IDs
+        data = pending_requests[event.chat_id]
+        source_id = data['source']
+        dest_id = data['dest']
+        
+        # Clean up state
+        del pending_requests[event.chat_id]
+
+        # Start Task
         is_running = True
-    except: await event.respond("❌ Usage: `/clone -100xxx -100yyy`")
+        current_task = asyncio.create_task(
+            transfer_process(event, source_id, dest_id, msg1_id, msg2_id)
+        )
+        
+    except Exception as e:
+        await event.respond(f"❌ Range Error: {e}")
 
 @bot_client.on(events.NewMessage(pattern='/stop'))
 async def stop_handler(event):
     global is_running
     is_running = False
     if current_task: current_task.cancel()
+    # Clear any pending states
+    if event.chat_id in pending_requests:
+        del pending_requests[event.chat_id]
     await event.respond("🛑 Stopping...")
 
 if __name__ == '__main__':
@@ -193,3 +296,4 @@ if __name__ == '__main__':
     bot_client.run_until_disconnected()
 
 
+    
