@@ -35,7 +35,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Ultra Stable)! 🛡️")
+    return web.Response(text="Bot is Running (Iterator Fixed)! 🚀")
 
 async def start_web_server():
     app = web.Application()
@@ -46,7 +46,7 @@ async def start_web_server():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
 
-# --- HELPER: FORMATTING ---
+# --- HELPER FUNCTIONS ---
 def human_readable_size(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024.0: return f"{size:.2f}{unit}"
@@ -61,7 +61,6 @@ def time_formatter(seconds):
     if minutes > 0: return f"{minutes}m {seconds}s"
     return f"{seconds}s"
 
-# --- PROGRESS ENGINE ---
 async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message, animation_frame
     now = time.time()
@@ -74,16 +73,16 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["📥", "📦", "📤", "✅"]
+    frames = ["📥", "💿", "💾", "📤"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
     filled = math.floor(percentage / 10)
-    bar = "▓" * filled + "░" * (10 - filled)
+    bar = "█" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
-            f"{icon} **Moving File...**\n"
+            f"{icon} **Transferring...**\n"
             f"📄 `{file_name}`\n\n"
             f"**{bar} {round(percentage, 1)}%**\n\n"
             f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
@@ -93,7 +92,7 @@ async def progress_callback(current, total, start_time, file_name):
     except MessageNotModifiedError: pass
     except Exception: pass
 
-# --- CUSTOM STREAM CLASS (BUFFER FIX) ---
+# --- CUSTOM STREAM CLASS (THE REAL FIX) ---
 class UserClientStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -102,45 +101,34 @@ class UserClientStream:
         self.file_name = file_name
         self.start_time = start_time
         self.current_bytes = 0
+        # ERROR FIX: Using iter_download instead of download_file with offset
+        self.generator = client.iter_download(location, chunk_size=512*1024)
+        self.buffer = b""
+        self._finished = False
 
     def __len__(self):
         return self.file_size
 
-    # THE CRITICAL FIX: Ensure we return EXACTLY 'size' bytes unless EOF
     async def read(self, size=-1):
-        if size == -1: size = 1024 * 1024 # 1MB Default
+        if size == -1: size = 512 * 1024
         
-        data = b""
-        while len(data) < size:
-            # Check EOF
-            if self.current_bytes >= self.file_size:
-                break
-                
-            # Calculate remaining needed for this read request
-            needed = size - len(data)
-            
+        # Buffer ko tab tak bharo jab tak required size na mil jaye
+        while len(self.buffer) < size and not self._finished:
             try:
-                chunk = await self.client.download_file(
-                    self.location, 
-                    file=bytes, 
-                    offset=self.current_bytes, 
-                    limit=needed
-                )
-                
-                if not chunk:
-                    break
-                    
-                data += chunk
+                chunk = await self.generator.__anext__()
+                self.buffer += chunk
                 self.current_bytes += len(chunk)
-                
-                # Update progress sparingly
-                if len(data) >= size or self.current_bytes >= self.file_size:
-                    await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
-                    
+                await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
+            except StopAsyncIteration:
+                self._finished = True
             except Exception as e:
-                logger.error(f"Download Chunk Error: {e}")
+                logger.error(f"Stream Gen Error: {e}")
+                self._finished = True
                 break
-                
+
+        # Return required chunk
+        data = self.buffer[:size]
+        self.buffer = self.buffer[size:]
         return data
 
     @property
@@ -149,10 +137,8 @@ class UserClientStream:
 # --- ATTRIBUTE CLEANER ---
 def clean_attributes(original_attributes, file_name):
     new_attributes = []
-    # 1. Filename is Mandatory
     new_attributes.append(DocumentAttributeFilename(file_name=file_name))
     
-    # 2. Copy Video/Audio Props
     for attr in original_attributes:
         if isinstance(attr, DocumentAttributeVideo):
             new_attributes.append(DocumentAttributeVideo(
@@ -182,7 +168,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🛡️ **System Online!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"⚙️ **Bot Connected!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -194,7 +180,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
             if getattr(message, 'action', None): continue
 
             try:
-                # --- METADATA EXTRACTION ---
+                # --- METADATA ---
                 file_name = "Unknown"
                 mime_type = "application/octet-stream"
                 original_attributes = []
@@ -203,40 +189,31 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                     if hasattr(message.media, 'document'):
                         original_attributes = list(message.media.document.attributes)
                         mime_type = message.media.document.mime_type
-                        
-                        # Find existing name
                         for attr in original_attributes:
-                            if isinstance(attr, DocumentAttributeFilename):
-                                file_name = attr.file_name
-                                break
-                        
-                        # Generate name if missing
+                            if isinstance(attr, DocumentAttributeFilename): file_name = attr.file_name; break
                         if file_name == "Unknown":
                             ext = mime_type.split('/')[-1]
-                            if 'pdf' in mime_type: ext = 'pdf'
-                            elif 'video' in mime_type: ext = 'mp4'
                             file_name = f"file_{message.id}.{ext}"
-
                     elif hasattr(message.media, 'photo'):
-                        file_name = f"IMG_{message.id}.jpg"
+                        file_name = f"Image_{message.id}.jpg"
                         mime_type = "image/jpeg"
 
                 await status_message.edit(f"🔍 **Found:** `{file_name}`")
 
-                # --- TRANSFER LOGIC ---
+                # --- TRANSFER ---
                 if message.text and not message.media:
                     await bot_client.send_message(dest_id, message.text)
                 
                 elif message.media:
                     start_time = time.time()
                     
-                    # Direct Copy Try
                     try:
+                        # Direct Copy (Fastest)
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
                     
                     except Exception:
-                        # Stream Mode
+                        # Stream Mode (Reliable)
                         file_size = 0
                         location = None
                         
@@ -248,10 +225,9 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                             location = message.media.photo
 
                         if location:
-                            # Prepare Clean Attributes
                             clean_attrs = clean_attributes(original_attributes, file_name)
                             
-                            # Small File Strategy (<10MB)
+                            # Small files (<10MB) -> Direct Download
                             if file_size < 10*1024*1024:
                                 buffer = await user_client.download_media(message, file=bytes)
                                 await bot_client.send_file(
@@ -262,11 +238,8 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                     force_document=('video' not in mime_type and 'image' not in mime_type)
                                 )
                             else:
-                                # Large File Strategy (Buffered Stream)
-                                stream = UserClientStream(
-                                    user_client, location, file_size, file_name, start_time
-                                )
-                                
+                                # Large File -> Iterator Stream
+                                stream = UserClientStream(user_client, location, file_size, file_name, start_time)
                                 thumb = await user_client.download_media(message, thumb=-1)
 
                                 await bot_client.send_file(
@@ -288,24 +261,24 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
-                # Log error but try to continue
                 logger.error(f"Failed {message.id}: {e}")
-                try: await status_message.edit(f"❌ **Failed:** `{file_name}`\n`{str(e)[:30]}`")
+                # Detail error reporting
+                try: await status_message.edit(f"❌ **Error:** `{file_name}`\n`{str(e)[:50]}`")
                 except: pass
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **Done!**\nTotal: `{total_processed}`")
+            await status_message.edit(f"✅ **Completed!**\nTotal: `{total_processed}`")
 
     except Exception as e:
-        if status_message: await status_message.edit(f"❌ Error: {e}")
+        if status_message: await status_message.edit(f"❌ Critical Error: {e}")
     finally:
         is_running = False
 
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🛡️ **Stable Bot Ready!**\n`/clone Source Dest`")
+    await event.respond("🛠️ **Final Fix Bot Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
@@ -346,4 +319,3 @@ if __name__ == '__main__':
     bot_client.run_until_disconnected()
 
 
-                 
