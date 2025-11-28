@@ -6,7 +6,6 @@ import math
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
-from telethon.tl.types import DocumentAttributeVideo
 from aiohttp import web
 
 # --- CONFIGURATION ---
@@ -15,8 +14,6 @@ API_HASH = os.environ.get("API_HASH")
 STRING_SESSION = os.environ.get("STRING_SESSION") 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")           
 PORT = int(os.environ.get("PORT", 8080))
-# RAM Management: 200MB se badi file hone par pipeline rook jayegi
-LARGE_FILE_THRESHOLD = 200 * 1024 * 1024 
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,14 +24,14 @@ user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
 # --- GLOBAL VARS ---
-queue = asyncio.Queue(maxsize=1) # Sirf 1 file advance me rakhega
+current_task = None
 is_running = False
 status_message = None
 last_update_time = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running in High Speed Mode! ⚡️")
+    return web.Response(text="Bot is Running (Stable Mode)! 🛡️")
 
 async def start_web_server():
     app = web.Application()
@@ -52,10 +49,10 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f}TB"
 
-async def progress_callback(current, total, start_time, file_name, task_type="Uploading"):
+async def progress_callback(current, total, start_time, file_name, task_type):
     global last_update_time, status_message
     now = time.time()
-    if now - last_update_time < 4: return # Update every 4s
+    if now - last_update_time < 5: return # Update every 5s to save API limits
     last_update_time = now
     
     percentage = current * 100 / total
@@ -69,7 +66,7 @@ async def progress_callback(current, total, start_time, file_name, task_type="Up
     
     try:
         await status_message.edit(
-            f"⚡️ **High Speed Mode**\n"
+            f"🛡️ **Stable Mode**\n"
             f"📂 `{file_name}`\n"
             f"{task_type}: {progress_bar}\n"
             f"🚀 Speed: `{human_readable_size(speed)}/s`\n"
@@ -77,144 +74,116 @@ async def progress_callback(current, total, start_time, file_name, task_type="Up
         )
     except: pass
 
-# --- PRODUCER: DOWNLOADER TASK ---
-async def producer_worker(source_id):
+# --- TRANSFER LOGIC ---
+async def transfer_process(event, source_id, dest_id):
     global is_running, status_message
     
-    async for message in user_client.iter_messages(source_id, reverse=True):
-        if not is_running: break
-        if getattr(message, 'action', None): continue
+    status_message = await event.respond(f"🛡️ **Initializing Stable Clone...**\nSource: `{source_id}`")
+    total_processed = 0
+    
+    try:
+        async for message in user_client.iter_messages(source_id, reverse=True):
+            if not is_running:
+                await status_message.edit("🛑 **Stopped by User!**")
+                break
 
-        # --- SMART LOGIC ---
-        # Item ko queue me daalne ke liye pack karo
-        item = {'msg': message, 'type': 'text', 'data': None, 'thumb': None, 'attrs': []}
-
-        if message.media:
-            file_size = 0
-            if hasattr(message.media, 'document'):
-                file_size = message.media.document.size
-            elif hasattr(message.media, 'photo'):
-                file_size = 5 * 1024 * 1024 # Approx 5MB for photo
-
-            # Agar file bahut badi hai, to pehle queue khali hone ka wait karo (RAM Safety)
-            if file_size > LARGE_FILE_THRESHOLD:
-                await queue.join()
+            if getattr(message, 'action', None):
+                continue
 
             try:
-                # 1. Attributes & Name Nikalo
+                # --- METADATA EXTRACTION ---
                 file_name = "Unknown"
-                if hasattr(message.media, 'document'):
-                    item['attrs'] = message.media.document.attributes
-                    for attr in item['attrs']:
-                        if hasattr(attr, 'file_name'):
-                            file_name = attr.file_name
+                attributes = []
+                if message.media:
+                    if hasattr(message.media, 'document'):
+                        attributes = message.media.document.attributes
+                        for attr in attributes:
+                            if hasattr(attr, 'file_name'):
+                                file_name = attr.file_name
 
-                # 2. Download Thumbnail
-                item['thumb'] = await user_client.download_media(message, thumb=-1)
+                # --- PHASE 1: DOWNLOAD ---
+                await status_message.edit(f"⬇️ **Downloading:** `{file_name}`\nPlease Wait...")
                 
-                # 3. Download Main File to RAM
-                # Note: Hum ye background me kar rahe hain jabki uploading chal rahi hai
-                start = time.time()
-                item['data'] = await user_client.download_media(message, file=bytes)
-                item['type'] = 'media'
-                item['name'] = file_name
+                # Thumbnail
+                thumb = await user_client.download_media(message, thumb=-1) if message.media else None
                 
+                # Main File Download (With Progress)
+                buffer = None
+                if message.media:
+                    start_time = time.time()
+                    async def dl_callback(curr, tot):
+                        await progress_callback(curr, tot, start_time, file_name, "⬇️ Downloading")
+                    
+                    try:
+                        buffer = await user_client.download_media(message, file=bytes, progress_callback=dl_callback)
+                    except Exception as e:
+                        logger.error(f"Download Failed: {e}")
+                        continue
+
+                # --- PHASE 2: UPLOAD ---
+                await status_message.edit(f"⬆️ **Uploading:** `{file_name}`\nAlmost there...")
+
+                if message.text and not message.media:
+                    await bot_client.send_message(dest_id, message.text)
+                
+                elif buffer:
+                    start_time = time.time()
+                    async def ul_callback(curr, tot):
+                        await progress_callback(curr, tot, start_time, file_name, "⬆️ Uploading")
+
+                    await bot_client.send_file(
+                        dest_id,
+                        file=buffer,
+                        caption=message.text or "",
+                        attributes=attributes,
+                        thumb=thumb,
+                        supports_streaming=True,
+                        progress_callback=ul_callback
+                    )
+                    
+                # Cleanup
+                if thumb and os.path.exists(thumb): os.remove(thumb)
+                if buffer: del buffer # Free RAM immediately
+                
+                total_processed += 1
+                await asyncio.sleep(1) # Cool down
+
+            except FloodWaitError as e:
+                logger.warning(f"FloodWait: {e.seconds}s")
+                await asyncio.sleep(e.seconds)
             except Exception as e:
-                logger.error(f"Download Fail: {e}")
+                logger.error(f"Error on {message.id}: {e}")
                 continue
-        
-        else:
-             item['data'] = message.text
 
-        # Queue me daalo (Agar queue full hai to ye wait karega = Pipelining)
-        await queue.put(item)
-    
-    # End Signal
-    await queue.put(None)
+        if is_running:
+            await status_message.edit(f"✅ **Clone Complete!**\nTotal: `{total_processed}` files.")
 
-# --- CONSUMER: UPLOADER TASK ---
-async def consumer_worker(dest_id, event):
-    global is_running, status_message
-    
-    while is_running:
-        item = await queue.get()
-        if item is None: # End Signal
-            break
-
-        try:
-            msg = item['msg']
-            
-            # --- UPLOAD PHASE ---
-            if item['type'] == 'text':
-                await bot_client.send_message(dest_id, item['data'])
-            
-            elif item['type'] == 'media':
-                start_time = time.time()
-                
-                async def callback(curr, tot):
-                    await progress_callback(curr, tot, start_time, item['name'])
-
-                await bot_client.send_file(
-                    dest_id,
-                    file=item['data'],
-                    caption=msg.text or "",
-                    attributes=item['attrs'],
-                    thumb=item['thumb'],
-                    supports_streaming=True,
-                    progress_callback=callback
-                )
-                
-                # Cleanup Thumb
-                if item['thumb'] and os.path.exists(item['thumb']):
-                    os.remove(item['thumb'])
-
-        except FloodWaitError as e:
-            logger.warning(f"Sleeping {e.seconds}s for FloodWait")
-            await asyncio.sleep(e.seconds)
-        except Exception as e:
-            logger.error(f"Upload Error: {e}")
-        finally:
-            queue.task_done()
-
-    await status_message.edit("✅ **All Files Transferred!**")
-
-# --- MAIN CONTROLLER ---
-async def start_cloning(event, source_id, dest_id):
-    global is_running, status_message
-    status_message = await event.respond(f"⚡️ **High Speed Pipeline Started!**\nPreparing files...")
-    
-    is_running = True
-    
-    # Do task parallel chalayenge
-    producer = asyncio.create_task(producer_worker(source_id))
-    consumer = asyncio.create_task(consumer_worker(dest_id, event))
-    
-    await asyncio.gather(producer, consumer)
-    is_running = False
+    except Exception as e:
+        if status_message: await status_message.edit(f"❌ Error: {e}")
+    finally:
+        is_running = False
 
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("⚡️ **Speed Bot Ready!**\nUse: `/clone <Source> <Dest>`\nStop: `/stop`")
+    await event.respond("🛡️ **Stable Bot Ready!**\n`/clone <Source> <Dest>`\n`/stop`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_handler(event):
     global current_task, is_running
-    if is_running: return await event.respond("⚠️ Already Running!")
+    if is_running: return await event.respond("⚠️ Already running.")
     try:
         args = event.text.split()
-        current_task = asyncio.create_task(start_cloning(event, int(args[1]), int(args[2])))
+        current_task = asyncio.create_task(transfer_process(event, int(args[1]), int(args[2])))
+        is_running = True
     except: await event.respond("❌ Usage: `/clone -100xxx -100yyy`")
 
 @bot_client.on(events.NewMessage(pattern='/stop'))
 async def stop_handler(event):
     global is_running
     is_running = False
-    # Queue ko clear karo taaki tasks fans na jayein
-    while not queue.empty():
-        try: queue.get_nowait()
-        except: pass
-    await event.respond("🛑 Stopping Pipeline...")
+    if current_task: current_task.cancel()
+    await event.respond("🛑 Stopping...")
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
