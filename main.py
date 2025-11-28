@@ -35,7 +35,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Video Fixed)! 🎬")
+    return web.Response(text="Bot is Running (Ultra Stable)! 🛡️")
 
 async def start_web_server():
     app = web.Application()
@@ -74,17 +74,17 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["🎬", "🎞", "📽", "🎥"]
+    frames = ["📥", "📦", "📤", "✅"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
     filled = math.floor(percentage / 10)
-    bar = "█" * filled + "░" * (10 - filled)
+    bar = "▓" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
-            f"{icon} **Transferring Video...**\n"
-            f"📂 `{file_name}`\n\n"
+            f"{icon} **Moving File...**\n"
+            f"📄 `{file_name}`\n\n"
             f"**{bar} {round(percentage, 1)}%**\n\n"
             f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
             f"⏳ **ETA:** `{time_formatter(eta)}`\n"
@@ -93,7 +93,7 @@ async def progress_callback(current, total, start_time, file_name):
     except MessageNotModifiedError: pass
     except Exception: pass
 
-# --- CUSTOM STREAM CLASS ---
+# --- CUSTOM STREAM CLASS (BUFFER FIX) ---
 class UserClientStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -106,46 +106,62 @@ class UserClientStream:
     def __len__(self):
         return self.file_size
 
-    async def read(self, chunk_size=-1):
-        if chunk_size == -1: chunk_size = 512 * 1024 
-        if self.current_bytes >= self.file_size: return b""
-
-        try:
-            chunk = await self.client.download_file(
-                self.location, 
-                file=bytes, 
-                offset=self.current_bytes, 
-                limit=chunk_size
-            )
-            if chunk:
+    # THE CRITICAL FIX: Ensure we return EXACTLY 'size' bytes unless EOF
+    async def read(self, size=-1):
+        if size == -1: size = 1024 * 1024 # 1MB Default
+        
+        data = b""
+        while len(data) < size:
+            # Check EOF
+            if self.current_bytes >= self.file_size:
+                break
+                
+            # Calculate remaining needed for this read request
+            needed = size - len(data)
+            
+            try:
+                chunk = await self.client.download_file(
+                    self.location, 
+                    file=bytes, 
+                    offset=self.current_bytes, 
+                    limit=needed
+                )
+                
+                if not chunk:
+                    break
+                    
+                data += chunk
                 self.current_bytes += len(chunk)
-                await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
-                return chunk
-            return b""
-        except Exception as e:
-            logger.error(f"Stream Error: {e}")
-            return b""
+                
+                # Update progress sparingly
+                if len(data) >= size or self.current_bytes >= self.file_size:
+                    await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
+                    
+            except Exception as e:
+                logger.error(f"Download Chunk Error: {e}")
+                break
+                
+        return data
 
     @property
     def name(self): return self.file_name
 
-# --- ATTRIBUTE CLEANER (THE FIX) ---
+# --- ATTRIBUTE CLEANER ---
 def clean_attributes(original_attributes, file_name):
     new_attributes = []
-    # Always add filename
+    # 1. Filename is Mandatory
     new_attributes.append(DocumentAttributeFilename(file_name=file_name))
     
+    # 2. Copy Video/Audio Props
     for attr in original_attributes:
-        # Video Attributes (Duration, W, H) copy karo
         if isinstance(attr, DocumentAttributeVideo):
             new_attributes.append(DocumentAttributeVideo(
                 duration=attr.duration,
                 w=attr.w,
                 h=attr.h,
                 round_message=attr.round_message,
-                supports_streaming=True # FORCE STREAMING
+                supports_streaming=True
             ))
-        # Audio Attributes copy karo
         elif isinstance(attr, DocumentAttributeAudio):
             new_attributes.append(DocumentAttributeAudio(
                 duration=attr.duration,
@@ -153,7 +169,6 @@ def clean_attributes(original_attributes, file_name):
                 title=attr.title,
                 performer=attr.performer
             ))
-    
     return new_attributes
 
 # --- LINK PARSER ---
@@ -167,7 +182,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🚀 **Video Bot Started!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"🛡️ **System Online!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -180,7 +195,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 
             try:
                 # --- METADATA EXTRACTION ---
-                file_name = "Unknown_File"
+                file_name = "Unknown"
                 mime_type = "application/octet-stream"
                 original_attributes = []
                 
@@ -189,18 +204,21 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                         original_attributes = list(message.media.document.attributes)
                         mime_type = message.media.document.mime_type
                         
-                        # Find Name
+                        # Find existing name
                         for attr in original_attributes:
                             if isinstance(attr, DocumentAttributeFilename):
                                 file_name = attr.file_name
                                 break
-                        # Fallback Name
-                        if file_name == "Unknown_File":
+                        
+                        # Generate name if missing
+                        if file_name == "Unknown":
                             ext = mime_type.split('/')[-1]
-                            file_name = f"video_{message.id}.{ext}"
+                            if 'pdf' in mime_type: ext = 'pdf'
+                            elif 'video' in mime_type: ext = 'mp4'
+                            file_name = f"file_{message.id}.{ext}"
 
                     elif hasattr(message.media, 'photo'):
-                        file_name = f"Image_{message.id}.jpg"
+                        file_name = f"IMG_{message.id}.jpg"
                         mime_type = "image/jpeg"
 
                 await status_message.edit(f"🔍 **Found:** `{file_name}`")
@@ -212,12 +230,12 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                 elif message.media:
                     start_time = time.time()
                     
+                    # Direct Copy Try
                     try:
-                        # Attempt Direct Copy (Sabse Fast)
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
                     
-                    except Exception as e:
+                    except Exception:
                         # Stream Mode
                         file_size = 0
                         location = None
@@ -230,10 +248,10 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                             location = message.media.photo
 
                         if location:
-                            # Clean Attributes (Video Fix)
+                            # Prepare Clean Attributes
                             clean_attrs = clean_attributes(original_attributes, file_name)
                             
-                            # Small files Direct Download
+                            # Small File Strategy (<10MB)
                             if file_size < 10*1024*1024:
                                 buffer = await user_client.download_media(message, file=bytes)
                                 await bot_client.send_file(
@@ -244,7 +262,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                     force_document=('video' not in mime_type and 'image' not in mime_type)
                                 )
                             else:
-                                # Large File Stream
+                                # Large File Strategy (Buffered Stream)
                                 stream = UserClientStream(
                                     user_client, location, file_size, file_name, start_time
                                 )
@@ -255,10 +273,11 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                     dest_id,
                                     file=stream,
                                     caption=message.text or "",
-                                    attributes=clean_attrs, # Clean attributes passed
+                                    attributes=clean_attrs,
                                     thumb=thumb,
-                                    supports_streaming=True, # Video will play!
-                                    file_size=file_size
+                                    supports_streaming=True,
+                                    file_size=file_size,
+                                    mime_type=mime_type
                                 )
                                 if thumb and os.path.exists(thumb): os.remove(thumb)
 
@@ -269,13 +288,14 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
-                # ERROR REPORTING IN CHAT
-                error_text = str(e)[:50]
-                await bot_client.send_message(event.chat_id, f"❌ **Failed:** `{file_name}`\nReason: `{error_text}`")
+                # Log error but try to continue
+                logger.error(f"Failed {message.id}: {e}")
+                try: await status_message.edit(f"❌ **Failed:** `{file_name}`\n`{str(e)[:30]}`")
+                except: pass
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **All Done!**\nTotal: `{total_processed}`")
+            await status_message.edit(f"✅ **Done!**\nTotal: `{total_processed}`")
 
     except Exception as e:
         if status_message: await status_message.edit(f"❌ Error: {e}")
@@ -285,7 +305,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🎬 **Video Fix Bot Ready!**\n`/clone Source Dest`")
+    await event.respond("🛡️ **Stable Bot Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
@@ -326,4 +346,4 @@ if __name__ == '__main__':
     bot_client.run_until_disconnected()
 
 
-                                    
+                 
