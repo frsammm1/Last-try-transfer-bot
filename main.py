@@ -6,7 +6,7 @@ import math
 import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, MessageNotModifiedError
 from aiohttp import web
 
 # --- CONFIGURATION ---
@@ -21,8 +21,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- CLIENT SETUP ---
-user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
-bot_client = TelegramClient('bot_session', API_ID, API_HASH)
+# Connection retries increased for stability
+user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH, connection_retries=None)
+bot_client = TelegramClient('bot_session', API_ID, API_HASH, connection_retries=None)
 
 # --- GLOBAL STATE ---
 pending_requests = {} 
@@ -34,7 +35,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running with Speedometer! 🏎️")
+    return web.Response(text="Bot is Running (Fixed Stream)! 🔧")
 
 async def start_web_server():
     app = web.Application()
@@ -53,56 +54,52 @@ def human_readable_size(size):
     return f"{size:.2f}TB"
 
 def time_formatter(seconds):
+    if seconds is None: return "Calculating..."
     minutes, seconds = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {seconds}s"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
+    if hours > 0: return f"{hours}h {minutes}m {seconds}s"
+    if minutes > 0: return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 # --- PROGRESS ENGINE ---
 async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message, animation_frame
     now = time.time()
     
-    # Update every 4 seconds (Optimized for Telegram Rate Limits)
-    if now - last_update_time < 4: return 
+    # Update every 5 seconds to reduce FloodWait
+    if now - last_update_time < 5: return 
     last_update_time = now
     
     # Calculations
-    percentage = current * 100 / total
+    percentage = current * 100 / total if total > 0 else 0
     time_diff = now - start_time
     speed = current / time_diff if time_diff > 0 else 0
-    
-    if speed > 0:
-        eta = (total - current) / speed
-    else:
-        eta = 0
+    eta = (total - current) / speed if speed > 0 else 0
         
     # Animation
-    frames = ["🚀", "🛸", "🚁", "✈️"]
+    frames = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
-    # Progress Bar Design
+    # Progress Bar
     filled = math.floor(percentage / 10)
-    bar = "▓" * filled + "░" * (10 - filled)
+    bar = "█" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
             f"{icon} **Live Transferring...**\n"
             f"📂 `{file_name}`\n\n"
             f"**{bar} {round(percentage, 1)}%**\n\n"
-            f"⚡️ **Speed:** `{human_readable_size(speed)}/s`\n"
+            f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
             f"⏳ **ETA:** `{time_formatter(eta)}`\n"
             f"💾 **Data:** `{human_readable_size(current)} / {human_readable_size(total)}`"
         )
+    except MessageNotModifiedError:
+        pass # Ignore if content is same
     except Exception:
         pass
 
-# --- CUSTOM STREAM CLASS (STABILITY CORE) ---
+# --- CUSTOM STREAM CLASS (THE FIX) ---
 class UserClientStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -115,28 +112,49 @@ class UserClientStream:
     def __len__(self):
         return self.file_size
 
-    async def read(self, chunk_size):
-        chunk = await self.client.download_file(
-            self.location, 
-            file=bytes, 
-            offset=self.current_bytes, 
-            limit=chunk_size
-        )
-        
-        if chunk:
-            self.current_bytes += len(chunk)
-            # Trigger Progress Update
-            await progress_callback(
-                self.current_bytes, 
-                self.file_size, 
-                self.start_time, 
-                self.file_name
-            )
-            return chunk
-        return b"" 
+    # FIXED: Added default value for chunk_size
+    async def read(self, chunk_size=-1):
+        # If chunk_size is not provided, use a reasonable default (512KB)
+        if chunk_size == -1:
+            chunk_size = 512 * 1024
+            
+        # Prevent reading past EOF
+        if self.current_bytes >= self.file_size:
+            return b""
 
-    async def __aiter__(self):
-        return self
+        # Download specific chunk
+        try:
+            chunk = await self.client.download_file(
+                self.location, 
+                file=bytes, 
+                offset=self.current_bytes, 
+                limit=chunk_size
+            )
+            
+            if chunk:
+                self.current_bytes += len(chunk)
+                await progress_callback(
+                    self.current_bytes, 
+                    self.file_size, 
+                    self.start_time, 
+                    self.file_name
+                )
+                return chunk
+            return b""
+        except Exception as e:
+            logger.error(f"Stream Read Error: {e}")
+            # Return empty bytes to stop stream gracefully instead of crashing
+            return b""
+
+    # Required methods for file-like objects
+    def tell(self):
+        return self.current_bytes
+        
+    def seek(self, offset, whence=0):
+        if whence == 0: self.current_bytes = offset
+        elif whence == 1: self.current_bytes += offset
+        elif whence == 2: self.current_bytes = self.file_size + offset
+        return self.current_bytes
 
 # --- LINK PARSER ---
 def extract_id_from_link(link):
@@ -149,7 +167,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🏎️ **Engine Started!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"⚙️ **Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -170,8 +188,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                             if hasattr(attr, 'file_name'): file_name = attr.file_name
                     elif hasattr(message.media, 'photo'): file_name = "Photo.jpg"
 
-                # Start Signal
-                await status_message.edit(f"🔍 **Found:** `{file_name}`\nInitiating Stream...")
+                await status_message.edit(f"🔍 **Processing:** `{file_name}`")
 
                 if message.text and not message.media:
                     await bot_client.send_message(dest_id, message.text)
@@ -181,44 +198,65 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                     
                     try:
                         # Attempt Direct Copy (Instant)
+                        # NOTE: Attributes pass nahi karte direct copy me, Telegram handle karta hai
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
                         await status_message.edit(f"✅ **Instant Copy:** `{file_name}`")
                     
-                    except Exception:
-                        # Fallback to Stream Mode (with Speedometer)
-                        file_size = 0
-                        if hasattr(message.media, 'document'): file_size = message.media.document.size
-                        elif hasattr(message.media, 'photo'): file_size = 5*1024*1024
-
-                        stream = UserClientStream(
-                            user_client, 
-                            message.media.document if hasattr(message.media, 'document') else message.media.photo,
-                            file_size,
-                            file_name,
-                            start_time
-                        )
-
-                        thumb = await user_client.download_media(message, thumb=-1)
-
-                        await bot_client.send_file(
-                            dest_id,
-                            file=stream,
-                            caption=message.text or "",
-                            attributes=attributes,
-                            thumb=thumb,
-                            supports_streaming=True
-                        )
+                    except Exception as e:
+                        # Fallback to Stream Mode
+                        logger.info(f"Direct copy failed ({e}), switching to Stream...")
                         
-                        if thumb and os.path.exists(thumb): os.remove(thumb)
+                        file_size = 0
+                        location = None
+                        
+                        if hasattr(message.media, 'document'):
+                            file_size = message.media.document.size
+                            location = message.media.document
+                        elif hasattr(message.media, 'photo'):
+                            file_size = 0 # Photo size unknown beforehand usually
+                            location = message.media.photo
+
+                        # Only stream if we have a valid file location
+                        if location:
+                            # If size is 0/unknown, we must download fully first (Photos mostly)
+                            if file_size == 0 or file_size < 10*1024*1024:
+                                buffer = await user_client.download_media(message, file=bytes)
+                                await bot_client.send_file(dest_id, buffer, caption=message.text or "")
+                            else:
+                                # Large File Stream
+                                stream = UserClientStream(
+                                    user_client, 
+                                    location,
+                                    file_size,
+                                    file_name,
+                                    start_time
+                                )
+
+                                thumb = await user_client.download_media(message, thumb=-1)
+
+                                await bot_client.send_file(
+                                    dest_id,
+                                    file=stream,
+                                    caption=message.text or "",
+                                    attributes=attributes,
+                                    thumb=thumb,
+                                    supports_streaming=True,
+                                    file_size=file_size # Explicitly telling size helps Telethon
+                                )
+                                
+                                if thumb and os.path.exists(thumb): os.remove(thumb)
 
                 total_processed += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(2) # Stability Delay
 
             except FloodWaitError as e:
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
                 logger.error(f"Error on {message.id}: {e}")
+                # Important: Update status so user knows it failed but moving on
+                try: await status_message.edit(f"❌ Skipped `{file_name}`: {str(e)[:20]}...")
+                except: pass
                 continue
 
         if is_running:
@@ -232,7 +270,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🏎️ **Speed Bot Ready!**\n\n1. `/clone Source Dest`\n2. Send Range Link (`.../10-.../20`)")
+    await event.respond("⚙️ **Fixed Bot Ready!**\n\n1. `/clone Source Dest`\n2. Send Range Link")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
@@ -273,4 +311,4 @@ if __name__ == '__main__':
     bot_client.run_until_disconnected()
 
 
-                  
+                 
