@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import math
+import re  # <--- YE MISSING THA, AB DAAL DIYA HAI
 from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, MessageNotModifiedError
@@ -20,7 +21,7 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENT SETUP (Keep Alive) ---
+# --- CLIENT SETUP ---
 user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
@@ -33,7 +34,7 @@ last_update_time = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Direct Pipe Mode)! 🟢")
+    return web.Response(text="Bot is Running (Fixed Import)! 🟢")
 
 async def start_web_server():
     app = web.Application()
@@ -52,25 +53,15 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f}TB"
 
-def time_formatter(seconds):
-    if seconds is None or seconds < 0: return "..."
-    minutes, seconds = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours > 0: return f"{hours}h {minutes}m {seconds}s"
-    return f"{minutes}m {seconds}s"
-
 # --- PROGRESS CALLBACK ---
 async def progress_callback(current, total):
     global last_update_time, status_message
     now = time.time()
     
-    # Update status every 5 seconds to avoid FloodWait
     if now - last_update_time < 5: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
-    
-    # Progress Bar
     filled = math.floor(percentage / 10)
     bar = "█" * filled + "░" * (10 - filled)
     
@@ -80,19 +71,16 @@ async def progress_callback(current, total):
             f"**{bar} {round(percentage, 1)}%**\n"
             f"💾 `{human_readable_size(current)} / {human_readable_size(total)}`"
         )
-    except Exception: pass # Ignore edits errors
+    except Exception: pass
 
-# --- ATTRIBUTE FIXER (Video & Name Fix) ---
+# --- ATTRIBUTE FIXER ---
 def get_file_attributes(message):
     attributes = []
-    
-    # Force Filename
     file_name = "Unknown"
     if message.file and message.file.name:
         file_name = message.file.name
     attributes.append(DocumentAttributeFilename(file_name=file_name))
     
-    # Preserve Video Metadata
     if message.media and hasattr(message.media, 'document'):
         for attr in message.media.document.attributes:
             if isinstance(attr, DocumentAttributeVideo):
@@ -101,11 +89,10 @@ def get_file_attributes(message):
                     w=attr.w,
                     h=attr.h,
                     round_message=attr.round_message,
-                    supports_streaming=True # Crucial for playing video
+                    supports_streaming=True
                 ))
             elif isinstance(attr, DocumentAttributeAudio):
                 attributes.append(attr)
-                
     return attributes
 
 # --- LINK PARSER ---
@@ -116,7 +103,6 @@ def extract_id_from_link(link):
     return None
 
 # --- FAST DOWNLOAD GENERATOR ---
-# Ye function chunk-by-chunk download karke seedha upload ko deta hai
 async def file_stream_generator(message):
     async for chunk in user_client.iter_download(message.media, chunk_size=1024*1024):
         yield chunk
@@ -137,7 +123,6 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
             if getattr(message, 'action', None): continue
 
             try:
-                # --- IDENTIFY FILE ---
                 msg_caption = message.text or ""
                 file_name = "Text Message"
                 if message.file:
@@ -145,37 +130,26 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 
                 await status_message.edit(f"🔍 **Processing:** `{file_name}`")
 
-                # --- TRANSFER LOGIC ---
                 if not message.media:
-                    # Text Only
                     await bot_client.send_message(dest_id, msg_caption)
-                
                 else:
-                    # Media (Photo/Video/Doc)
-                    
-                    # 1. Try DIRECT COPY (Fastest - No Data Usage)
+                    # 1. Try DIRECT COPY
                     try:
                         await bot_client.send_file(dest_id, message.media, caption=msg_caption)
                         await status_message.edit(f"✅ **Fast Copied:** `{file_name}`")
-                    
                     except Exception:
-                        # 2. Try PIPE STREAM (If Direct fails)
-                        # Hum file ko save nahi karenge, seedha stream karenge
-                        
+                        # 2. Try PIPE STREAM
                         attributes = get_file_attributes(message)
-                        
-                        # Thumbnail logic
                         thumb = await user_client.download_media(message, thumb=-1)
                         
-                        # Upload using Generator
                         await bot_client.send_file(
                             dest_id,
-                            file=file_stream_generator(message), # <--- MAGIC HAPPENS HERE
+                            file=file_stream_generator(message),
                             caption=msg_caption,
                             attributes=attributes,
                             thumb=thumb,
                             supports_streaming=True,
-                            file_size=message.file.size, # Important for progress bar
+                            file_size=message.file.size,
                             progress_callback=progress_callback
                         )
                         
@@ -187,9 +161,9 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
             except FloodWaitError as e:
                 await asyncio.sleep(e.seconds)
             except Exception as e:
-                # ERROR REPORTING
                 logger.error(f"Failed {message.id}: {e}")
-                await bot_client.send_message(event.chat_id, f"❌ **Skipped:** `{file_name}`\nReason: `{e}`")
+                try: await bot_client.send_message(event.chat_id, f"❌ **Skipped:** `{file_name}`\nReason: `{e}`")
+                except: pass
                 continue
 
         if is_running:
@@ -203,7 +177,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🟢 **Direct Pipe Bot Ready!**\n1. `/clone Source Dest`\n2. Send Range Link")
+    await event.respond("🟢 **Fixed Bot Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
