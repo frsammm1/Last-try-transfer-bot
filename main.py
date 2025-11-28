@@ -3,9 +3,7 @@ import asyncio
 import logging
 import time
 import math
-import re
-import random
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, MessageNotModifiedError
 from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo, DocumentAttributeAudio
@@ -22,22 +20,9 @@ PORT = int(os.environ.get("PORT", 8080))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENT SETUP ---
-# Connection Optimization: Increased pool size and retries
-user_client = TelegramClient(
-    StringSession(STRING_SESSION), 
-    API_ID, 
-    API_HASH, 
-    connection_retries=None,
-    flood_sleep_threshold=60
-)
-bot_client = TelegramClient(
-    'bot_session', 
-    API_ID, 
-    API_HASH, 
-    connection_retries=None,
-    flood_sleep_threshold=60
-)
+# --- CLIENT SETUP (Keep Alive) ---
+user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
 # --- GLOBAL STATE ---
 pending_requests = {} 
@@ -45,12 +30,10 @@ current_task = None
 is_running = False
 status_message = None
 last_update_time = 0
-animation_frame = 0
-bot_instance_id = random.randint(100, 999) # To identify duplicate bots
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text=f"Bot Running! ID: {bot_instance_id} 🟢")
+    return web.Response(text="Bot is Running (Direct Pipe Mode)! 🟢")
 
 async def start_web_server():
     app = web.Application()
@@ -63,123 +46,67 @@ async def start_web_server():
 
 # --- HELPER FUNCTIONS ---
 def human_readable_size(size):
+    if not size: return "0B"
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024.0: return f"{size:.2f}{unit}"
         size /= 1024.0
     return f"{size:.2f}TB"
 
 def time_formatter(seconds):
-    if seconds is None: return "..."
+    if seconds is None or seconds < 0: return "..."
     minutes, seconds = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
     if hours > 0: return f"{hours}h {minutes}m {seconds}s"
-    if minutes > 0: return f"{minutes}m {seconds}s"
-    return f"{seconds}s"
+    return f"{minutes}m {seconds}s"
 
-async def progress_callback(current, total, start_time, file_name):
-    global last_update_time, status_message, animation_frame
+# --- PROGRESS CALLBACK ---
+async def progress_callback(current, total):
+    global last_update_time, status_message
     now = time.time()
     
-    # Update every 6 seconds (Optimization)
-    if now - last_update_time < 6: return 
+    # Update status every 5 seconds to avoid FloodWait
+    if now - last_update_time < 5: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
-    time_diff = now - start_time
-    speed = current / time_diff if time_diff > 0 else 0
-    eta = (total - current) / speed if speed > 0 else 0
-        
-    frames = ["⚡️", "🚀", "🏎", "🔥"]
-    icon = frames[animation_frame % len(frames)]
-    animation_frame += 1
     
+    # Progress Bar
     filled = math.floor(percentage / 10)
     bar = "█" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
-            f"{icon} **PRE-FETCH TURBO MODE**\n"
-            f"📄 `{file_name}`\n\n"
-            f"**{bar} {round(percentage, 1)}%**\n\n"
-            f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
-            f"⏳ **ETA:** `{time_formatter(eta)}`\n"
-            f"💾 **Data:** `{human_readable_size(current)}`"
+            f"🔄 **Transferring...**\n"
+            f"**{bar} {round(percentage, 1)}%**\n"
+            f"💾 `{human_readable_size(current)} / {human_readable_size(total)}`"
         )
-    except MessageNotModifiedError: pass
-    except Exception: pass
+    except Exception: pass # Ignore edits errors
 
-# --- SMART PRE-FETCH STREAM (THE LOGIC UPGRADE) ---
-class SmartBufferedStream:
-    def __init__(self, client, location, file_size, file_name, start_time):
-        self.client = client
-        self.location = location
-        self.file_size = file_size
-        self.file_name = file_name
-        self.start_time = start_time
-        self.current_bytes = 0
-        
-        # 4MB Chunk Size (Optimum for Pre-fetching)
-        self.generator = client.iter_download(location, chunk_size=4096*1024)
-        
-        # Start fetching the FIRST chunk immediately
-        self.next_chunk_task = asyncio.create_task(self._fetch_next())
-        self._finished = False
-
-    async def _fetch_next(self):
-        """Background task to fetch data"""
-        try:
-            return await self.generator.__anext__()
-        except StopAsyncIteration:
-            return b""
-        except Exception as e:
-            logger.error(f"Prefetch Error: {e}")
-            return b""
-
-    def __len__(self):
-        return self.file_size
-
-    async def read(self, size=-1):
-        if self._finished: return b""
-        
-        # Wait for the chunk that was being fetched in background
-        chunk = await self.next_chunk_task
-        
-        # If we got data, immediately start fetching the NEXT one
-        # while the uploader is busy uploading this one.
-        if chunk:
-            self.next_chunk_task = asyncio.create_task(self._fetch_next())
-            self.current_bytes += len(chunk)
-            await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
-            return chunk
-        else:
-            self._finished = True
-            return b""
-
-    @property
-    def name(self): return self.file_name
-
-# --- ATTRIBUTE CLEANER ---
-def clean_attributes(original_attributes, file_name):
-    new_attributes = []
-    new_attributes.append(DocumentAttributeFilename(file_name=file_name))
+# --- ATTRIBUTE FIXER (Video & Name Fix) ---
+def get_file_attributes(message):
+    attributes = []
     
-    for attr in original_attributes:
-        if isinstance(attr, DocumentAttributeVideo):
-            new_attributes.append(DocumentAttributeVideo(
-                duration=attr.duration,
-                w=attr.w,
-                h=attr.h,
-                round_message=attr.round_message,
-                supports_streaming=True
-            ))
-        elif isinstance(attr, DocumentAttributeAudio):
-            new_attributes.append(DocumentAttributeAudio(
-                duration=attr.duration,
-                voice=attr.voice,
-                title=attr.title,
-                performer=attr.performer
-            ))
-    return new_attributes
+    # Force Filename
+    file_name = "Unknown"
+    if message.file and message.file.name:
+        file_name = message.file.name
+    attributes.append(DocumentAttributeFilename(file_name=file_name))
+    
+    # Preserve Video Metadata
+    if message.media and hasattr(message.media, 'document'):
+        for attr in message.media.document.attributes:
+            if isinstance(attr, DocumentAttributeVideo):
+                attributes.append(DocumentAttributeVideo(
+                    duration=attr.duration,
+                    w=attr.w,
+                    h=attr.h,
+                    round_message=attr.round_message,
+                    supports_streaming=True # Crucial for playing video
+                ))
+            elif isinstance(attr, DocumentAttributeAudio):
+                attributes.append(attr)
+                
+    return attributes
 
 # --- LINK PARSER ---
 def extract_id_from_link(link):
@@ -188,130 +115,95 @@ def extract_id_from_link(link):
     if match: return int(match.group(1))
     return None
 
+# --- FAST DOWNLOAD GENERATOR ---
+# Ye function chunk-by-chunk download karke seedha upload ko deta hai
+async def file_stream_generator(message):
+    async for chunk in user_client.iter_download(message.media, chunk_size=1024*1024):
+        yield chunk
+
 # --- TRANSFER PROCESS ---
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"⚡️ **Turbo Connected!** (ID: {bot_instance_id})\nSource: `{source_id}`")
+    status_message = await event.respond(f"🚀 **Direct Pipe Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
         async for message in user_client.iter_messages(source_id, min_id=start_msg-1, max_id=end_msg+1, reverse=True):
-            # POWERFUL STOP CHECK
             if not is_running:
-                await status_message.edit("🛑 **FORCE STOPPED!**")
-                raise asyncio.CancelledError("User stopped the process")
+                await status_message.edit("🛑 **Stopped by User!**")
+                break
 
             if getattr(message, 'action', None): continue
 
             try:
-                # --- METADATA ---
-                file_name = "Unknown"
-                mime_type = "application/octet-stream"
-                original_attributes = []
-                
-                if message.media:
-                    if hasattr(message.media, 'document'):
-                        original_attributes = list(message.media.document.attributes)
-                        mime_type = message.media.document.mime_type
-                        for attr in original_attributes:
-                            if isinstance(attr, DocumentAttributeFilename): file_name = attr.file_name; break
-                        if file_name == "Unknown":
-                            ext = mime_type.split('/')[-1]
-                            file_name = f"file_{message.id}.{ext}"
-                    elif hasattr(message.media, 'photo'):
-                        file_name = f"Image_{message.id}.jpg"
-                        mime_type = "image/jpeg"
+                # --- IDENTIFY FILE ---
+                msg_caption = message.text or ""
+                file_name = "Text Message"
+                if message.file:
+                    file_name = message.file.name or "Unknown Media"
 
-                await status_message.edit(f"🔍 **Found:** `{file_name}`")
+                await status_message.edit(f"🔍 **Processing:** `{file_name}`")
 
-                # --- TRANSFER ---
-                if message.text and not message.media:
-                    await bot_client.send_message(dest_id, message.text)
+                # --- TRANSFER LOGIC ---
+                if not message.media:
+                    # Text Only
+                    await bot_client.send_message(dest_id, msg_caption)
                 
-                elif message.media:
-                    start_time = time.time()
-                    sent_successfully = False
+                else:
+                    # Media (Photo/Video/Doc)
                     
-                    # 1. DIRECT COPY
+                    # 1. Try DIRECT COPY (Fastest - No Data Usage)
                     try:
-                        await bot_client.send_file(dest_id, message.media, caption=message.text or "")
-                        await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
-                        sent_successfully = True
+                        await bot_client.send_file(dest_id, message.media, caption=msg_caption)
+                        await status_message.edit(f"✅ **Fast Copied:** `{file_name}`")
+                    
                     except Exception:
-                        pass 
-
-                    # 2. SMART PRE-FETCH STREAM (If Direct Failed)
-                    if not sent_successfully:
-                        file_size = 0
-                        location = None
+                        # 2. Try PIPE STREAM (If Direct fails)
+                        # Hum file ko save nahi karenge, seedha stream karenge
                         
-                        if hasattr(message.media, 'document'):
-                            file_size = message.media.document.size
-                            location = message.media.document
-                        elif hasattr(message.media, 'photo'):
-                            file_size = 5*1024*1024 
-                            location = message.media.photo
-
-                        if location:
-                            clean_attrs = clean_attributes(original_attributes, file_name)
-                            
-                            # Small File Strategy
-                            if file_size < 10*1024*1024:
-                                buffer = await user_client.download_media(message, file=bytes)
-                                await bot_client.send_file(
-                                    dest_id, 
-                                    buffer, 
-                                    caption=message.text or "",
-                                    attributes=clean_attrs,
-                                    force_document=('video' not in mime_type and 'image' not in mime_type)
-                                )
-                            else:
-                                # USE SMART STREAM
-                                stream = SmartBufferedStream(user_client, location, file_size, file_name, start_time)
-                                thumb = await user_client.download_media(message, thumb=-1)
-
-                                await bot_client.send_file(
-                                    dest_id,
-                                    file=stream,
-                                    caption=message.text or "",
-                                    attributes=clean_attrs,
-                                    thumb=thumb,
-                                    supports_streaming=True,
-                                    file_size=file_size,
-                                    mime_type=mime_type
-                                )
-                                if thumb and os.path.exists(thumb): os.remove(thumb)
-                        else:
-                             await bot_client.send_file(dest_id, message.media)
+                        attributes = get_file_attributes(message)
+                        
+                        # Thumbnail logic
+                        thumb = await user_client.download_media(message, thumb=-1)
+                        
+                        # Upload using Generator
+                        await bot_client.send_file(
+                            dest_id,
+                            file=file_stream_generator(message), # <--- MAGIC HAPPENS HERE
+                            caption=msg_caption,
+                            attributes=attributes,
+                            thumb=thumb,
+                            supports_streaming=True,
+                            file_size=message.file.size, # Important for progress bar
+                            progress_callback=progress_callback
+                        )
+                        
+                        if thumb and os.path.exists(thumb): os.remove(thumb)
+                        await status_message.edit(f"✅ **Streamed:** `{file_name}`")
 
                 total_processed += 1
                 
-            except asyncio.CancelledError:
-                raise # Re-raise to stop outer loop
             except FloodWaitError as e:
-                logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
+                # ERROR REPORTING
                 logger.error(f"Failed {message.id}: {e}")
-                try: await status_message.edit(f"❌ **Failed:** `{file_name}`\n`{str(e)[:50]}`")
-                except: pass
+                await bot_client.send_message(event.chat_id, f"❌ **Skipped:** `{file_name}`\nReason: `{e}`")
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **Job Done!**\nTotal: `{total_processed}`")
+            await status_message.edit(f"✅ **Task Completed!**\nTotal Messages: `{total_processed}`")
 
-    except asyncio.CancelledError:
-        if status_message: await status_message.edit("🛑 **Terminated Successfully.**")
     except Exception as e:
-        if status_message: await status_message.edit(f"❌ Critical Error: {e}")
+        await status_message.edit(f"❌ **Critical Error:** {e}")
     finally:
         is_running = False
 
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond(f"⚡️ **Turbo Bot Online!** (Instance: {bot_instance_id})\n`/clone Source Dest`")
+    await event.respond("🟢 **Direct Pipe Bot Ready!**\n1. `/clone Source Dest`\n2. Send Range Link")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
@@ -339,16 +231,10 @@ async def range_listener(event):
 
 @bot_client.on(events.NewMessage(pattern='/stop'))
 async def stop_handler(event):
-    global is_running, current_task
-    
-    # POWERFUL STOP
+    global is_running
     is_running = False
-    if current_task: 
-        current_task.cancel() # Kill async task
-        current_task = None
-    
-    pending_requests.clear() # Clear queue
-    await event.respond("🛑 **ALL TASKS KILLED!**")
+    if current_task: current_task.cancel()
+    await event.respond("🛑 **Force Stopped!**")
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
