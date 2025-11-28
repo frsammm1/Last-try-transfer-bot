@@ -6,7 +6,7 @@ import math
 import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, MessageNotModifiedError
+from telethon.errors import FloodWaitError, MessageNotModifiedError, RPCError
 from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo, DocumentAttributeAudio
 from aiohttp import web
 
@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- CLIENT SETUP ---
+# Connection retries infinite to prevent dropping
 user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH, connection_retries=None)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH, connection_retries=None)
 
@@ -35,7 +36,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (No Duplicates)! 💎")
+    return web.Response(text="Bot is Running (No Doubles)! 💎")
 
 async def start_web_server():
     app = web.Application()
@@ -65,7 +66,8 @@ async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message, animation_frame
     now = time.time()
     
-    if now - last_update_time < 5: return 
+    # Update every 8 seconds (To save bandwidth for actual transfer)
+    if now - last_update_time < 8: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
@@ -73,7 +75,7 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["🚀", "🛸", "🚁", "✈️"]
+    frames = ["⚡️", "🔥", "🚀", "💫"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
@@ -101,8 +103,8 @@ class UserClientStream:
         self.file_name = file_name
         self.start_time = start_time
         self.current_bytes = 0
-        # Increased Chunk Size to 1MB for Speed
-        self.generator = client.iter_download(location, chunk_size=1024*1024)
+        # TURBO MODE: 2MB Chunks (Increases Speed)
+        self.generator = client.iter_download(location, chunk_size=2048*1024)
         self.buffer = b""
         self._finished = False
 
@@ -110,9 +112,7 @@ class UserClientStream:
         return self.file_size
 
     async def read(self, size=-1):
-        # Default read request usually comes as -1 or small chunks
-        # We ensure we serve at least 1MB or requested size
-        if size == -1: size = 1024 * 1024
+        if size == -1: size = 2048 * 1024 # 2MB Default
         
         while len(self.buffer) < size and not self._finished:
             try:
@@ -168,7 +168,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"⚙️ **System Online!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"⚙️ **Turbo Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -206,19 +206,19 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                 
                 elif message.media:
                     start_time = time.time()
+                    sent_successfully = False  # <--- DUPLICATE PROTECTION FLAG
                     
                     # --- ATTEMPT 1: DIRECT COPY ---
-                    success = False
                     try:
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
-                        success = True
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
+                        sent_successfully = True # Mark as done
                     except Exception as e:
-                        # Log but don't stop, move to Stream Mode
-                        logger.info(f"Direct copy failed for {file_name}: {e}")
+                        # Only log error, don't stop
+                        logger.info(f"Direct copy skipped: {e}")
 
                     # --- ATTEMPT 2: STREAM MODE (ONLY IF DIRECT FAILED) ---
-                    if not success:
+                    if not sent_successfully:
                         file_size = 0
                         location = None
                         
@@ -259,12 +259,11 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                 )
                                 if thumb and os.path.exists(thumb): os.remove(thumb)
                         else:
-                             # Fallback for stickers/others
                              await bot_client.send_file(dest_id, message.media)
 
                 total_processed += 1
-                await asyncio.sleep(0.5)
-
+                # Removed sleep to increase overall speed
+                
             except FloodWaitError as e:
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
@@ -285,7 +284,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🛠️ **Pro Bot Ready!**\n1. `/clone Source Dest`\n2. Send Range Link")
+    await event.respond("🛠️ **Final Bot Ready!**\n1. `/clone Source Dest`\n2. Send Range Link")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
