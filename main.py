@@ -35,7 +35,7 @@ animation_frame = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Iterator Fixed)! 🚀")
+    return web.Response(text="Bot is Running (No Duplicates)! 💎")
 
 async def start_web_server():
     app = web.Application()
@@ -73,7 +73,7 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["📥", "💿", "💾", "📤"]
+    frames = ["🚀", "🛸", "🚁", "✈️"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
@@ -92,7 +92,7 @@ async def progress_callback(current, total, start_time, file_name):
     except MessageNotModifiedError: pass
     except Exception: pass
 
-# --- CUSTOM STREAM CLASS (THE REAL FIX) ---
+# --- CUSTOM STREAM CLASS ---
 class UserClientStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -101,8 +101,8 @@ class UserClientStream:
         self.file_name = file_name
         self.start_time = start_time
         self.current_bytes = 0
-        # ERROR FIX: Using iter_download instead of download_file with offset
-        self.generator = client.iter_download(location, chunk_size=512*1024)
+        # Increased Chunk Size to 1MB for Speed
+        self.generator = client.iter_download(location, chunk_size=1024*1024)
         self.buffer = b""
         self._finished = False
 
@@ -110,9 +110,10 @@ class UserClientStream:
         return self.file_size
 
     async def read(self, size=-1):
-        if size == -1: size = 512 * 1024
+        # Default read request usually comes as -1 or small chunks
+        # We ensure we serve at least 1MB or requested size
+        if size == -1: size = 1024 * 1024
         
-        # Buffer ko tab tak bharo jab tak required size na mil jaye
         while len(self.buffer) < size and not self._finished:
             try:
                 chunk = await self.generator.__anext__()
@@ -122,11 +123,10 @@ class UserClientStream:
             except StopAsyncIteration:
                 self._finished = True
             except Exception as e:
-                logger.error(f"Stream Gen Error: {e}")
+                logger.error(f"Stream Read Error: {e}")
                 self._finished = True
                 break
 
-        # Return required chunk
         data = self.buffer[:size]
         self.buffer = self.buffer[size:]
         return data
@@ -168,7 +168,7 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"⚙️ **Bot Connected!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"⚙️ **System Online!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
@@ -180,7 +180,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
             if getattr(message, 'action', None): continue
 
             try:
-                # --- METADATA ---
+                # --- METADATA SETUP ---
                 file_name = "Unknown"
                 mime_type = "application/octet-stream"
                 original_attributes = []
@@ -200,20 +200,25 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 
                 await status_message.edit(f"🔍 **Found:** `{file_name}`")
 
-                # --- TRANSFER ---
+                # --- TRANSFER LOGIC ---
                 if message.text and not message.media:
                     await bot_client.send_message(dest_id, message.text)
                 
                 elif message.media:
                     start_time = time.time()
                     
+                    # --- ATTEMPT 1: DIRECT COPY ---
+                    success = False
                     try:
-                        # Direct Copy (Fastest)
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
+                        success = True
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
-                    
-                    except Exception:
-                        # Stream Mode (Reliable)
+                    except Exception as e:
+                        # Log but don't stop, move to Stream Mode
+                        logger.info(f"Direct copy failed for {file_name}: {e}")
+
+                    # --- ATTEMPT 2: STREAM MODE (ONLY IF DIRECT FAILED) ---
+                    if not success:
                         file_size = 0
                         location = None
                         
@@ -227,7 +232,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                         if location:
                             clean_attrs = clean_attributes(original_attributes, file_name)
                             
-                            # Small files (<10MB) -> Direct Download
+                            # Small File -> Direct Download (<10MB)
                             if file_size < 10*1024*1024:
                                 buffer = await user_client.download_media(message, file=bytes)
                                 await bot_client.send_file(
@@ -253,22 +258,24 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                     mime_type=mime_type
                                 )
                                 if thumb and os.path.exists(thumb): os.remove(thumb)
+                        else:
+                             # Fallback for stickers/others
+                             await bot_client.send_file(dest_id, message.media)
 
                 total_processed += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
             except FloodWaitError as e:
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
                 logger.error(f"Failed {message.id}: {e}")
-                # Detail error reporting
-                try: await status_message.edit(f"❌ **Error:** `{file_name}`\n`{str(e)[:50]}`")
+                try: await status_message.edit(f"❌ **Failed:** `{file_name}`\n`{str(e)[:50]}`")
                 except: pass
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **Completed!**\nTotal: `{total_processed}`")
+            await status_message.edit(f"✅ **Job Done!**\nTotal: `{total_processed}`")
 
     except Exception as e:
         if status_message: await status_message.edit(f"❌ Critical Error: {e}")
@@ -278,7 +285,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🛠️ **Final Fix Bot Ready!**\n`/clone Source Dest`")
+    await event.respond("🛠️ **Pro Bot Ready!**\n1. `/clone Source Dest`\n2. Send Range Link")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
