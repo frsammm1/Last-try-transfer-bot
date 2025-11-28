@@ -34,7 +34,7 @@ last_update_time = 0
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Generator Fixed)! 🟢")
+    return web.Response(text="Bot is Running (Original File Fixed)! 🟢")
 
 async def start_web_server():
     app = web.Application()
@@ -78,42 +78,45 @@ async def progress_callback(current, total, start_time, file_name):
     
     try:
         await status_message.edit(
-            f"🔄 **Streaming...**\n"
+            f"🔄 **Transferring...**\n"
             f"📂 `{file_name}`\n"
             f"**{bar} {round(percentage, 1)}%**\n"
             f"🚀 `{human_readable_size(speed)}/s` | ⏳ `{time_formatter(eta)}`\n"
-            f"💾 `{human_readable_size(current)}`"
+            f"💾 `{human_readable_size(current)} / {human_readable_size(total)}`"
         )
     except Exception: pass
 
-# --- THE FIX: CLASS WRAPPER FOR GENERATOR ---
-# Ye class Generator ko "File" jaisa dikhati hai taaki Telethon error na de
-class GeneratorFile:
+# --- CUSTOM FILE CLASS (The Heart of the Fix) ---
+class CustomStreamFile:
     def __init__(self, client, location, file_size, file_name, start_time):
-        self.generator = client.iter_download(location, chunk_size=1024*1024) # 1MB Chunks
+        self.client = client
+        self.location = location
         self.file_size = file_size
         self.name = file_name
         self.start_time = start_time
         self.current_bytes = 0
+        # 2MB Chunks for better speed
+        self.generator = client.iter_download(location, chunk_size=2048*1024)
         self.buffer = b""
 
     def __len__(self):
         return self.file_size
 
     async def read(self, size=-1):
-        # Buffer logic to ensure we return bytes when asked
         if size == -1: size = 1024 * 1024
         
+        # Buffer ko tab tak bharo jab tak required data na aa jaye
         while len(self.buffer) < size:
             try:
                 chunk = await self.generator.__anext__()
+                if not chunk: break
                 self.buffer += chunk
                 self.current_bytes += len(chunk)
                 await progress_callback(self.current_bytes, self.file_size, self.start_time, self.name)
             except StopAsyncIteration:
                 break
             except Exception as e:
-                logger.error(f"Gen Error: {e}")
+                logger.error(f"Download Error: {e}")
                 break
         
         data = self.buffer[:size]
@@ -124,13 +127,13 @@ class GeneratorFile:
 def get_clean_attributes(message):
     attributes = []
     
-    # 1. Filename Fix
+    # 1. Force Filename
     file_name = "Unknown"
     if message.file and message.file.name:
         file_name = message.file.name
     attributes.append(DocumentAttributeFilename(file_name=file_name))
     
-    # 2. Video/Audio Fix
+    # 2. Preserve Video Metadata (Height, Width, Duration)
     if message.media and hasattr(message.media, 'document'):
         for attr in message.media.document.attributes:
             if isinstance(attr, DocumentAttributeVideo):
@@ -139,7 +142,7 @@ def get_clean_attributes(message):
                     w=attr.w,
                     h=attr.h,
                     round_message=attr.round_message,
-                    supports_streaming=True
+                    supports_streaming=True # Video Player Fix
                 ))
             elif isinstance(attr, DocumentAttributeAudio):
                 attributes.append(attr)
@@ -156,13 +159,13 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🚀 **Final Engine Started!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"🚀 **Fixed Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
     
     try:
         async for message in user_client.iter_messages(source_id, min_id=start_msg-1, max_id=end_msg+1, reverse=True):
             if not is_running:
-                await status_message.edit("🛑 **Stopped!**")
+                await status_message.edit("🛑 **Stopped by User!**")
                 break
 
             if getattr(message, 'action', None): continue
@@ -180,21 +183,21 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                     sent = False
                     start_time = time.time()
                     
-                    # 1. Direct Copy (Best)
+                    # 1. Direct Copy (Try first)
                     try:
                         await bot_client.send_file(dest_id, message.media, caption=message.text or "")
                         sent = True
                         await status_message.edit(f"✅ **Fast Copied:** `{file_name}`")
                     except Exception:
-                        pass # Fail silently to Stream Mode
+                        pass # Move to stream if this fails
 
                     # 2. Stream Mode (Backup)
                     if not sent:
                         attributes = get_clean_attributes(message)
                         thumb = await user_client.download_media(message, thumb=-1)
                         
-                        # Create Wrapper Object
-                        stream_file = GeneratorFile(
+                        # Create Stream Object
+                        stream_file = CustomStreamFile(
                             user_client, 
                             message.media.document if hasattr(message.media, 'document') else message.media.photo,
                             message.file.size,
@@ -202,17 +205,19 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                             start_time
                         )
                         
+                        # THE FIX: Explicitly passing file_size
                         await bot_client.send_file(
                             dest_id,
-                            file=stream_file, # <--- Passing CLASS OBJECT instead of generator
+                            file=stream_file,
                             caption=message.text or "",
                             attributes=attributes,
                             thumb=thumb,
-                            supports_streaming=True
+                            supports_streaming=True,
+                            file_size=message.file.size # <--- YEH ZAROORI THA
                         )
                         
                         if thumb and os.path.exists(thumb): os.remove(thumb)
-                        await status_message.edit(f"✅ **Streamed:** `{file_name}`")
+                        await status_message.edit(f"✅ **Sent:** `{file_name}`")
 
                 total_processed += 1
                 
@@ -220,13 +225,12 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                 await asyncio.sleep(e.seconds)
             except Exception as e:
                 logger.error(f"Failed {message.id}: {e}")
-                # Detailed Error
-                try: await bot_client.send_message(event.chat_id, f"❌ **Failed:** `{file_name}`\nReason: `{str(e)}`")
+                try: await bot_client.send_message(event.chat_id, f"❌ **Skipped:** `{file_name}`\nReason: `{str(e)[:50]}`")
                 except: pass
                 continue
 
         if is_running:
-            await status_message.edit(f"✅ **Task Completed!**\nTotal: `{total_processed}`")
+            await status_message.edit(f"✅ **Task Completed!**\nTotal Messages: `{total_processed}`")
 
     except Exception as e:
         await status_message.edit(f"❌ **Critical Error:** {e}")
@@ -236,12 +240,12 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🟢 **Ready!**\n`/clone Source Dest`")
+    await event.respond("🟢 **Bot Ready!**\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
     global is_running
-    if is_running: return await event.respond("⚠️ Busy...")
+    if is_running: return await event.respond("⚠️ Task Running...")
     try:
         args = event.text.split()
         pending_requests[event.chat_id] = {'source': int(args[1]), 'dest': int(args[2])}
