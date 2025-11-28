@@ -4,6 +4,7 @@ import logging
 import time
 import math
 import re
+import random
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError, MessageNotModifiedError
@@ -22,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- CLIENT SETUP ---
-# Connection Optimization
+# Connection Optimization: Increased pool size and retries
 user_client = TelegramClient(
     StringSession(STRING_SESSION), 
     API_ID, 
@@ -45,10 +46,11 @@ is_running = False
 status_message = None
 last_update_time = 0
 animation_frame = 0
+bot_instance_id = random.randint(100, 999) # To identify duplicate bots
 
 # --- WEB SERVER ---
 async def handle(request):
-    return web.Response(text="Bot is Running (Max Speed)! 🟢")
+    return web.Response(text=f"Bot Running! ID: {bot_instance_id} 🟢")
 
 async def start_web_server():
     app = web.Application()
@@ -78,8 +80,8 @@ async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message, animation_frame
     now = time.time()
     
-    # Update every 8 seconds (Focus on Speed)
-    if now - last_update_time < 8: return 
+    # Update every 6 seconds (Optimization)
+    if now - last_update_time < 6: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
@@ -87,17 +89,17 @@ async def progress_callback(current, total, start_time, file_name):
     speed = current / time_diff if time_diff > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
         
-    frames = ["🟢", "🟡", "🟠", "🔴"]
+    frames = ["⚡️", "🚀", "🏎", "🔥"]
     icon = frames[animation_frame % len(frames)]
     animation_frame += 1
     
     filled = math.floor(percentage / 10)
-    bar = "▇" * filled + "░" * (10 - filled)
+    bar = "█" * filled + "░" * (10 - filled)
     
     try:
         await status_message.edit(
-            f"{icon} **MAX SPEED MODE**\n"
-            f"📂 `{file_name}`\n\n"
+            f"{icon} **PRE-FETCH TURBO MODE**\n"
+            f"📄 `{file_name}`\n\n"
             f"**{bar} {round(percentage, 1)}%**\n\n"
             f"🚀 **Speed:** `{human_readable_size(speed)}/s`\n"
             f"⏳ **ETA:** `{time_formatter(eta)}`\n"
@@ -106,8 +108,8 @@ async def progress_callback(current, total, start_time, file_name):
     except MessageNotModifiedError: pass
     except Exception: pass
 
-# --- CUSTOM STREAM CLASS (8MB CHUNKS) ---
-class UserClientStream:
+# --- SMART PRE-FETCH STREAM (THE LOGIC UPGRADE) ---
+class SmartBufferedStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
         self.location = location
@@ -116,34 +118,42 @@ class UserClientStream:
         self.start_time = start_time
         self.current_bytes = 0
         
-        # 8MB Chunks = Less API Calls = More Speed
-        self.generator = client.iter_download(location, chunk_size=8192*1024)
-        self.buffer = b""
+        # 4MB Chunk Size (Optimum for Pre-fetching)
+        self.generator = client.iter_download(location, chunk_size=4096*1024)
+        
+        # Start fetching the FIRST chunk immediately
+        self.next_chunk_task = asyncio.create_task(self._fetch_next())
         self._finished = False
+
+    async def _fetch_next(self):
+        """Background task to fetch data"""
+        try:
+            return await self.generator.__anext__()
+        except StopAsyncIteration:
+            return b""
+        except Exception as e:
+            logger.error(f"Prefetch Error: {e}")
+            return b""
 
     def __len__(self):
         return self.file_size
 
     async def read(self, size=-1):
-        # Always serve at least 8MB if possible
-        if size == -1: size = 8192 * 1024
+        if self._finished: return b""
         
-        while len(self.buffer) < size and not self._finished:
-            try:
-                chunk = await self.generator.__anext__()
-                self.buffer += chunk
-                self.current_bytes += len(chunk)
-                await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
-            except StopAsyncIteration:
-                self._finished = True
-            except Exception as e:
-                logger.error(f"Stream Read Error: {e}")
-                self._finished = True
-                break
-
-        data = self.buffer[:size]
-        self.buffer = self.buffer[size:]
-        return data
+        # Wait for the chunk that was being fetched in background
+        chunk = await self.next_chunk_task
+        
+        # If we got data, immediately start fetching the NEXT one
+        # while the uploader is busy uploading this one.
+        if chunk:
+            self.next_chunk_task = asyncio.create_task(self._fetch_next())
+            self.current_bytes += len(chunk)
+            await progress_callback(self.current_bytes, self.file_size, self.start_time, self.file_name)
+            return chunk
+        else:
+            self._finished = True
+            return b""
 
     @property
     def name(self): return self.file_name
@@ -182,14 +192,15 @@ def extract_id_from_link(link):
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
-    status_message = await event.respond(f"🟢 **Bot Connected!**\nSource: `{source_id}`")
+    status_message = await event.respond(f"⚡️ **Turbo Connected!** (ID: {bot_instance_id})\nSource: `{source_id}`")
     total_processed = 0
     
     try:
         async for message in user_client.iter_messages(source_id, min_id=start_msg-1, max_id=end_msg+1, reverse=True):
+            # POWERFUL STOP CHECK
             if not is_running:
-                await status_message.edit("🛑 **Stopped!**")
-                break
+                await status_message.edit("🛑 **FORCE STOPPED!**")
+                raise asyncio.CancelledError("User stopped the process")
 
             if getattr(message, 'action', None): continue
 
@@ -228,9 +239,9 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                         await status_message.edit(f"✅ **Fast Copy:** `{file_name}`")
                         sent_successfully = True
                     except Exception:
-                        pass # Fail silently to Stream Mode
+                        pass 
 
-                    # 2. STREAM MODE (If Direct Failed)
+                    # 2. SMART PRE-FETCH STREAM (If Direct Failed)
                     if not sent_successfully:
                         file_size = 0
                         location = None
@@ -245,6 +256,7 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                         if location:
                             clean_attrs = clean_attributes(original_attributes, file_name)
                             
+                            # Small File Strategy
                             if file_size < 10*1024*1024:
                                 buffer = await user_client.download_media(message, file=bytes)
                                 await bot_client.send_file(
@@ -255,7 +267,8 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
                                     force_document=('video' not in mime_type and 'image' not in mime_type)
                                 )
                             else:
-                                stream = UserClientStream(user_client, location, file_size, file_name, start_time)
+                                # USE SMART STREAM
+                                stream = SmartBufferedStream(user_client, location, file_size, file_name, start_time)
                                 thumb = await user_client.download_media(message, thumb=-1)
 
                                 await bot_client.send_file(
@@ -274,6 +287,8 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 
                 total_processed += 1
                 
+            except asyncio.CancelledError:
+                raise # Re-raise to stop outer loop
             except FloodWaitError as e:
                 logger.warning(f"FloodWait: {e.seconds}s")
                 await asyncio.sleep(e.seconds)
@@ -286,6 +301,8 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
         if is_running:
             await status_message.edit(f"✅ **Job Done!**\nTotal: `{total_processed}`")
 
+    except asyncio.CancelledError:
+        if status_message: await status_message.edit("🛑 **Terminated Successfully.**")
     except Exception as e:
         if status_message: await status_message.edit(f"❌ Critical Error: {e}")
     finally:
@@ -294,12 +311,12 @@ async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
 # --- COMMANDS ---
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await event.respond("🟢 **Max Speed Bot Ready!**\n`/clone Source Dest`")
+    await event.respond(f"⚡️ **Turbo Bot Online!** (Instance: {bot_instance_id})\n`/clone Source Dest`")
 
 @bot_client.on(events.NewMessage(pattern='/clone'))
 async def clone_init(event):
     global is_running
-    if is_running: return await event.respond("⚠️ Running...")
+    if is_running: return await event.respond("⚠️ Task Running...")
     try:
         args = event.text.split()
         pending_requests[event.chat_id] = {'source': int(args[1]), 'dest': int(args[2])}
@@ -322,10 +339,16 @@ async def range_listener(event):
 
 @bot_client.on(events.NewMessage(pattern='/stop'))
 async def stop_handler(event):
-    global is_running
+    global is_running, current_task
+    
+    # POWERFUL STOP
     is_running = False
-    if current_task: current_task.cancel()
-    await event.respond("🛑 Stopping...")
+    if current_task: 
+        current_task.cancel() # Kill async task
+        current_task = None
+    
+    pending_requests.clear() # Clear queue
+    await event.respond("🛑 **ALL TASKS KILLED!**")
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
