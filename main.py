@@ -56,7 +56,7 @@ def get_file_name(message):
 async def transfer_process(event, source_id, dest_id):
     global is_running
     
-    # Live Status Message bhejo
+    # Live Status Message
     status_msg = await event.respond(f"🚀 **Initializing Clone...**\nTarget: `{source_id}`")
     
     total_processed = 0
@@ -72,23 +72,27 @@ async def transfer_process(event, source_id, dest_id):
                 continue
 
             try:
-                # --- LIVE UPDATE LOGIC (Har 3-4 second me edit karega) ---
+                # --- LIVE UPDATE LOGIC ---
                 current_time = time.time()
                 file_info = "Text Message"
                 if message.media:
                     file_info = get_file_name(message)
 
-                if current_time - last_edit_time > 4: # FloodWait se bachne ke liye delay
-                    await bot_client.edit_message(
-                        event.chat_id, 
-                        status_msg.id,
-                        f"🔄 **Cloning in Progress...**\n\n"
-                        f"🆔 **Msg ID:** `{message.id}`\n"
-                        f"📂 **Current:** `{file_info}`\n"
-                        f"✅ **Done:** `{total_processed}` msgs\n"
-                        f"⏳ **Status:** Uploading..."
-                    )
-                    last_edit_time = current_time
+                # Edit message every 5 seconds to avoid FloodWait
+                if current_time - last_edit_time > 5: 
+                    try:
+                        await bot_client.edit_message(
+                            event.chat_id, 
+                            status_msg.id,
+                            f"🔄 **Cloning in Progress...**\n\n"
+                            f"🆔 **Msg ID:** `{message.id}`\n"
+                            f"📂 **Current:** `{file_info}`\n"
+                            f"✅ **Done:** `{total_processed}` msgs\n"
+                            f"⏳ **Status:** Uploading..."
+                        )
+                        last_edit_time = current_time
+                    except Exception as e:
+                        logger.warning(f"Status update skipped: {e}")
                 
                 # --- PROCESSING ---
                 await asyncio.sleep(random.uniform(2, 4))
@@ -106,8 +110,8 @@ async def transfer_process(event, source_id, dest_id):
                         await bot_client.send_message(dest_id, caption)
                     except Exception:
                         # Attempt 2: Stream (No Disk)
-                        # Status update for streaming
-                        if current_time - last_edit_time > 4:
+                        # Update status for RAM usage
+                        if current_time - last_edit_time > 5:
                             await bot_client.edit_message(event.chat_id, status_msg.id, f"⬇️ **Downloading to RAM:** `{file_info}`")
                         
                         buffer = await user_client.download_media(message, file=bytes)
@@ -170,18 +174,4 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
 
-🆕 इसमें नया क्या है?
- * Live Editing Message: अब बॉट एक मैसेज भेजेगा और उसे ही एडिट करता रहेगा।
- * File Name Detection: get_file_name फंक्शन लगा दिया है, जो बताएगा कि video.mp4 जा रहा है या document.pdf.
- * Real-Time Dashboard: बॉट अब ऐसा दिखेगा:
-   🔄 Cloning in Progress...
 
-🆔 Msg ID: 4502
-📂 Current: Avengers_Endgame_720p.mkv
-✅ Done: 15 msgs
-⏳ Status: Uploading...
-
-
-
-
-                        
